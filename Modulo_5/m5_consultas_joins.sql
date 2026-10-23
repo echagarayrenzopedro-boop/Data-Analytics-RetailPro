@@ -11,21 +11,43 @@
 --   ventas.id_producto    = productos.id_producto
 --   productos.id_categoria = categorias.id_categoria
 --
--- Nota: para las consultas 2 y 3 se agregaron al script de M3
--- 2 clientes y 1 producto sin ventas (ejecutar primero ese script).
+-- Requisito: haber ejecutado antes el script de M3 (ventas_tech_db.sql).
 -- =====================================================================
- 
+
 USE Ventas_Tech_DB;
 GO
- 
- 
+
+
+-- =====================================================================
+-- Datos de prueba para las consultas 2 y 3
+-- En la base de M3 todos los clientes compraron y todos los productos
+-- se vendieron, así que los LEFT JOIN no encontrarían casos. Se agregan
+-- 2 clientes y 1 producto sin ventas. No se modifica la tabla ventas,
+-- por lo que los resultados de M4 no cambian.
+-- IF NOT EXISTS evita duplicarlos si el script se ejecuta más de una vez.
+-- =====================================================================
+
+IF NOT EXISTS (SELECT 1 FROM clientes WHERE email = N'sofia.paredes@mail.com')
+    INSERT INTO clientes (nombre, apellido, email, ciudad, fecha_alta, activo)
+    VALUES (N'Sofía', N'Paredes', N'sofia.paredes@mail.com', N'Luján de Cuyo', '2024-03-08', 1);
+
+IF NOT EXISTS (SELECT 1 FROM clientes WHERE email = N'joaquin.ortiz@mail.com')
+    INSERT INTO clientes (nombre, apellido, email, ciudad, fecha_alta, activo)
+    VALUES (N'Joaquín', N'Ortiz', N'joaquin.ortiz@mail.com', N'Mendoza', '2024-03-20', 1);
+
+IF NOT EXISTS (SELECT 1 FROM productos WHERE nombre = N'Parlante Bluetooth')
+    INSERT INTO productos (nombre, id_categoria, precio_lista, stock)
+    VALUES (N'Parlante Bluetooth', 4, 85.00, 30);
+GO
+
+
 -- =====================================================================
 -- Consulta 1: Vista base del proyecto (INNER JOIN)
 -- Propósito: tener en una sola fila cada venta con su cliente, ciudad,
 -- producto y categoría. Es la fuente de datos principal para Power BI:
 -- "categoria" y "ciudad" sirven para agrupar, "fecha_venta" para filtrar.
 -- =====================================================================
- 
+
 SELECT
     v.id_venta,
     v.fecha_venta,
@@ -47,14 +69,14 @@ ORDER BY v.fecha_venta;
 -- Resultado esperado: 10 filas, la primera Lucía Fernández / Notebook / 1200.00
 -- Hallazgo: Computadoras y Monitores suman el 80% de la facturación
 -- (3750 de 4689), y Mendoza es la ciudad que más compra (1535, 32,7%).
- 
- 
+
+
 -- =====================================================================
 -- Consulta 2: Clientes sin ventas (LEFT JOIN)
 -- Propósito: detectar clientes registrados que nunca compraron, para que
 -- CRM los contacte con una acción de primera compra.
 -- =====================================================================
- 
+
 SELECT
     c.nombre + N' ' + c.apellido  AS cliente,
     c.email,
@@ -68,14 +90,14 @@ ORDER BY c.fecha_alta;
 -- Hallazgo: 2 de los 7 clientes registrados (29%) nunca compraron, y los 2
 -- se registraron en marzo 2024, el último mes con datos. Son altas recientes
 -- sin conversión: CRM debería contactarlos con una promo de primera compra.
- 
- 
+
+
 -- =====================================================================
 -- Consulta 3: Productos sin ventas (LEFT JOIN)
 -- Propósito: identificar artículos del catálogo sin movimiento, para que
 -- el área de producto decida si promocionarlos, bajarlos o no reponerlos.
 -- =====================================================================
- 
+
 SELECT
     p.nombre        AS producto,
     cat.nombre      AS categoria,
@@ -91,8 +113,8 @@ WHERE v.id_venta IS NULL;
 -- Hallazgo: 1 de los 7 productos del catálogo no tuvo ventas: el Parlante
 -- Bluetooth, con 30 unidades en stock inmovilizadas (2550 a precio de lista).
 -- Producto debería promocionarlo o frenar su reposición.
- 
- 
+
+
 -- =====================================================================
 -- Consulta 4: Consolidado por canal (UNION ALL)
 -- Propósito: comparar cuánto se vende en cada quincena del mes.
@@ -100,7 +122,7 @@ WHERE v.id_venta IS NULL;
 -- dentro de cada SELECT. Se usa UNION ALL (y no UNION) para que ninguna
 -- venta se pierda aunque coincida en todos sus valores con otra.
 -- =====================================================================
- 
+
 SELECT
     canal,
     COUNT(*)    AS cantidad_ventas,
@@ -112,9 +134,9 @@ FROM (
         'Primera quincena'          AS canal
     FROM ventas
     WHERE DAY(fecha_venta) <= 15
- 
+
     UNION ALL
- 
+
     SELECT
         fecha_venta,
         cantidad * precio_unitario  AS total,
