@@ -1,0 +1,151 @@
+=====================================================================
+ CÓDIGO M - PIPELINE ETL TECHSTORE - Pedro Echagaray
+ Pegar cada bloque en: Inicio > Editor avanzado (de la consulta indicada)
+ Borrar todo lo que haya (Ctrl+A, Supr) y pegar el bloque completo.
+ ORDEN: 1) Dim_Clientes  2) Dim_Productos  3) Dim_Categorias  4) Fact_Ventas
+ Ruta del Excel usada: C:\Users\HP RYZEN 5 8GB 256SD\Downloads\Pipeline_ETL_Dataset.xlsx
+=====================================================================
+
+
+---------------------------------------------------------------------
+ BLOQUE 1  >>>  consulta: Dim_Clientes
+---------------------------------------------------------------------
+let
+    // Autor: Pedro Echagaray | Checkpoint M6 - Pipeline ETL TechStore
+    // Origen: libro Excel provisto por el curso. Ruta fija: si el archivo se mueve,
+    // hay que actualizarla en Configuración de origen de datos
+    Origen = Excel.Workbook(File.Contents("C:\Users\HP RYZEN 5 8GB 256SD\Downloads\Pipeline_ETL_Dataset.xlsx"), null, true),
+    Hoja_Clientes = Origen{[Item="clientes",Kind="Sheet"]}[Data],
+    Encabezados_Promovidos = Table.PromoteHeaders(Hoja_Clientes, [PromoteAllScalars=true]),
+
+    // Tipado explícito: id_cliente como entero porque es la PK que se relaciona con
+    // Fact_Ventas[id_cliente]; si quedara como decimal o texto la relación 1:N del M8 falla.
+    // fecha_registro como Date para poder usar la tabla calendario y líneas de tiempo
+    Tipos_Corregidos = Table.TransformColumnTypes(Encabezados_Promovidos, {
+        {"id_cliente", Int64.Type}, {"nombre_cliente", type text}, {"email", type text},
+        {"ciudad", type text}, {"pais", type text}, {"segmento", type text},
+        {"fecha_registro", type date}}),
+
+    // Se descartan las filas totalmente vacías que Excel arrastra debajo de los datos
+    // (aparecen como null en todas las columnas). Se filtra por la PK: una fila sin
+    // id no representa ningún registro real y además rompería la unicidad de la clave
+    Quitar_Filas_Vacias = Table.SelectRows(Tipos_Corregidos, each [id_cliente] <> null),
+
+    // Se quitan duplicados SOLO por id_cliente (no por todas las columnas): una dimensión
+    // debe tener la PK única para que la relación con Fact_Ventas sea 1:N. El id 1
+    // (María López) estaba cargado dos veces y duplicaría sus ventas al relacionar
+    Quitar_Duplicados_PK = Table.Distinct(Quitar_Filas_Vacias, {"id_cliente"}),
+
+    // email nulo (cliente 9): NO se elimina la fila porque ese cliente tiene ventas;
+    // borrarlo dejaría ventas huérfanas. El email no participa en ningún cálculo,
+    // así que se marca "Sin dato" para que el faltante quede visible y no como blanco
+    Reemplazar_Email_Nulo = Table.ReplaceValue(Quitar_Duplicados_PK, null, "Sin dato", Replacer.ReplaceValue, {"email"}),
+
+    // ciudad nula (cliente 11): es un atributo de segmentación, no de cálculo.
+    // Se conserva el cliente y se agrupa como "Sin dato" en los análisis por ciudad
+    Reemplazar_Ciudad_Nula = Table.ReplaceValue(Reemplazar_Email_Nulo, null, "Sin dato", Replacer.ReplaceValue, {"ciudad"})
+in
+    Reemplazar_Ciudad_Nula
+
+
+---------------------------------------------------------------------
+ BLOQUE 2  >>>  consulta: Dim_Productos
+---------------------------------------------------------------------
+let
+    // Autor: Pedro Echagaray | Checkpoint M6 - Pipeline ETL TechStore
+    Origen = Excel.Workbook(File.Contents("C:\Users\HP RYZEN 5 8GB 256SD\Downloads\Pipeline_ETL_Dataset.xlsx"), null, true),
+    Hoja_Productos = Origen{[Item="productos",Kind="Sheet"]}[Data],
+    Encabezados_Promovidos = Table.PromoteHeaders(Hoja_Productos, [PromoteAllScalars=true]),
+
+    // precio y costo como decimal (importes); stock y activo como entero
+    // (activo es un indicador 1/0). id_producto entero = PK de la dimensión
+    Tipos_Corregidos = Table.TransformColumnTypes(Encabezados_Promovidos, {
+        {"id_producto", Int64.Type}, {"nombre_producto", type text}, {"categoria", type text},
+        {"subcategoria", type text}, {"precio", type number}, {"costo", type number},
+        {"stock", Int64.Type}, {"activo", Int64.Type}}),
+
+    // Se descartan las filas totalmente vacías que Excel arrastra debajo de los datos
+    // (aparecen como null en todas las columnas). Se filtra por la PK: una fila sin
+    // id no representa ningún registro real y además rompería la unicidad de la clave
+    Quitar_Filas_Vacias = Table.SelectRows(Tipos_Corregidos, each [id_producto] <> null),
+
+    // Duplicado por id_producto (103 Monitor 4K cargado dos veces). Si no se quita,
+    // el Merge con Fact_Ventas multiplicaría las ventas de ese producto y el
+    // ingreso total quedaría inflado
+    Quitar_Duplicados_PK = Table.Distinct(Quitar_Filas_Vacias, {"id_producto"}),
+
+    // precio nulo (109 SSD Externo 1TB): campo crítico para calcular ingreso.
+    // No se elimina: el producto tiene ventas registradas con precio_unitario = 130
+    // en Fact_Ventas, por lo que se completa con ese valor del propio sistema origen.
+    // Se condiciona al id 109 para no pisar otros nulos que aparezcan en el futuro
+    Completar_Precio_109 = Table.ReplaceValue(Quitar_Duplicados_PK,
+        each [precio],
+        each if [id_producto] = 109 and [precio] = null then 130 else [precio],
+        Replacer.ReplaceValue, {"precio"}),
+
+    // categoria nula (111 Laptop Gaming Pro): su subcategoría es "Laptops" y todas
+    // las laptops del catálogo (101, 105) pertenecen a "Computación". Se asigna por
+    // esa regla en vez de "Sin Categoría" para no generar una categoría inexistente
+    // en Dim_Categorias ni ensuciar los análisis por categoría
+    Completar_Categoria_Nula = Table.ReplaceValue(Completar_Precio_109, null, "Computación", Replacer.ReplaceValue, {"categoria"}),
+
+    // El reemplazo condicional del precio devuelve la columna como tipo "any".
+    // Se vuelve a tipar como decimal para que las medidas DAX (ingreso, margen)
+    // puedan sumarla y no la traten como texto
+    Retipar_Precio = Table.TransformColumnTypes(Completar_Categoria_Nula, {{"precio", type number}})
+in
+    Retipar_Precio
+
+
+---------------------------------------------------------------------
+ BLOQUE 3  >>>  consulta: Dim_Categorias
+---------------------------------------------------------------------
+let
+    // Autor: Pedro Echagaray | Checkpoint M6 - Pipeline ETL TechStore
+    Origen = Excel.Workbook(File.Contents("C:\Users\HP RYZEN 5 8GB 256SD\Downloads\Pipeline_ETL_Dataset.xlsx"), null, true),
+    Hoja_Categorias = Origen{[Item="categorias",Kind="Sheet"]}[Data],
+    Encabezados_Promovidos = Table.PromoteHeaders(Hoja_Categorias, [PromoteAllScalars=true]),
+    // Tabla de referencia limpia: solo se asegura el tipado
+    Tipos_Corregidos = Table.TransformColumnTypes(Encabezados_Promovidos, {
+        {"id_categoria", Int64.Type}, {"nombre_categoria", type text}, {"descripcion", type text}}),
+
+    // Se descartan las filas totalmente vacías que Excel arrastra debajo de los datos
+    // (aparecen como null en todas las columnas). Se filtra por la PK: una fila sin
+    // id no representa ningún registro real y además rompería la unicidad de la clave
+    Quitar_Filas_Vacias = Table.SelectRows(Tipos_Corregidos, each [id_categoria] <> null)
+in
+    Quitar_Filas_Vacias
+
+
+---------------------------------------------------------------------
+ BLOQUE 4  >>>  consulta: Fact_Ventas   (pegar ÚLTIMO)
+---------------------------------------------------------------------
+let
+    // Autor: Pedro Echagaray | Checkpoint M6 - Pipeline ETL TechStore
+    Origen = Excel.Workbook(File.Contents("C:\Users\HP RYZEN 5 8GB 256SD\Downloads\Pipeline_ETL_Dataset.xlsx"), null, true),
+    Hoja_Ventas = Origen{[Item="ventas",Kind="Sheet"]}[Data],
+    Encabezados_Promovidos = Table.PromoteHeaders(Hoja_Ventas, [PromoteAllScalars=true]),
+
+    // fecha_venta como Date (sin hora) para la tabla calendario del M8.
+    // Importes y descuento como decimal: el descuento es un porcentaje (0,05 = 5%)
+    // y como entero se redondearía a 0
+    Tipos_Corregidos = Table.TransformColumnTypes(Encabezados_Promovidos, {
+        {"id_venta", Int64.Type}, {"fecha_venta", type date}, {"id_cliente", Int64.Type},
+        {"id_producto", Int64.Type}, {"cantidad", Int64.Type}, {"precio_unitario", type number},
+        {"descuento", type number}, {"total_venta", type number}, {"canal", type text}}),
+
+    // Se descartan las filas totalmente vacías que Excel arrastra debajo de los datos
+    // (aparecen como null en todas las columnas). Se filtra por la PK: una fila sin
+    // id no representa ningún registro real y además rompería la unicidad de la clave
+    Quitar_Filas_Vacias = Table.SelectRows(Tipos_Corregidos, each [id_venta] <> null),
+
+    // Merge con Dim_Productos por id_producto (LeftOuter): se conservan las 50 ventas
+    // aunque algún producto no existiera en la dimensión. Funciona 1 a 1 porque
+    // Dim_Productos ya tiene la PK sin duplicados
+    Merge_Dim_Productos = Table.NestedJoin(Quitar_Filas_Vacias, {"id_producto"}, Dim_Productos, {"id_producto"}, "Dim_Productos", JoinKind.LeftOuter),
+
+    // Se expanden solo nombre_producto y categoria: traer precio o costo duplicaría
+    // información que ya vive en la dimensión
+    Expandir_Producto = Table.ExpandTableColumn(Merge_Dim_Productos, "Dim_Productos", {"nombre_producto", "categoria"}, {"nombre_producto", "categoria"})
+in
+    Expandir_Producto
